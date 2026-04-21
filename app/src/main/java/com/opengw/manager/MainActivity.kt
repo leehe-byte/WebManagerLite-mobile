@@ -9,6 +9,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.webkit.*
 import android.widget.*
@@ -21,6 +22,11 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -33,13 +39,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettings: FloatingActionButton
     
     private var currentPort = 8000
-    private val scope = CoroutineScope(Dispatchers.Main + Job())
     private val client = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).build()
+    
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        if (throwable !is SocketException && throwable !is IOException) {
+            Log.e("GlobalError", "Unhandled exception: ${throwable.message}")
+        }
+    }
+
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob() + exceptionHandler)
     
     private val CHANNEL_ID = "BatteryStatus"
     private var isBatteryFullNotified = false
     private var isBatteryLowNotified = false
     private var lastBackTime: Long = 0
+    private var tunnelJobs = mutableListOf<Job>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,17 +89,55 @@ class MainActivity : AppCompatActivity() {
         startBatteryMonitor()
     }
 
+    private fun startMultiTunnel(targetIp: String) {
+        tunnelJobs.forEach { it.cancel() }
+        tunnelJobs.clear()
+
+        val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
+        val p1 = prefs.getInt("port_opengw", 8000)
+        val p2 = prefs.getInt("port_official", 8080)
+        // 一次性监听所有端口
+        val ports = setOf(p1, p2, 7681, 8080, 8000)
+        
+        ports.forEach { port ->
+            val job = scope.launch(Dispatchers.IO) {
+                var serverSocket: ServerSocket? = null
+                try {
+                    serverSocket = ServerSocket()
+                    serverSocket.reuseAddress = true 
+                    serverSocket.bind(InetSocketAddress("127.0.0.1", port))
+                    Log.i("Tunnel", "Port $port mapped to $targetIp:$port")
+                    
+                    while (isActive) {
+                        val clientSocket = try { serverSocket.accept() } catch (e: Exception) { break }
+                        launch(Dispatchers.IO) {
+                            var targetSocket: Socket? = null
+                            try {
+                                targetSocket = Socket(targetIp, port)
+                                val j1 = launch { try { clientSocket.getInputStream().copyTo(targetSocket.getOutputStream()) } catch (e: Exception) {} }
+                                val j2 = launch { try { targetSocket.getInputStream().copyTo(clientSocket.getOutputStream()) } catch (e: Exception) {} }
+                                joinAll(j1, j2)
+                            } catch (e: Exception) {
+                            } finally {
+                                try { clientSocket.close() } catch (e: Exception) {}
+                                try { targetSocket?.close() } catch (e: Exception) {}
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("Tunnel", "Bind $port failed: ${e.message}")
+                } finally {
+                    try { serverSocket?.close() } catch (e: Exception) {}
+                }
+            }
+            tunnelJobs.add(job)
+        }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = "设备电源状态"
-            val descriptionText = "用于提醒受管理设备的电量充满或过低"
-            val importance = NotificationManager.IMPORTANCE_HIGH
-            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
-                description = descriptionText
-                enableLights(true)
-                enableVibration(true)
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-            }
+            val channel = NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_HIGH)
             val notificationManager: NotificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
         }
@@ -95,7 +147,7 @@ class MainActivity : AppCompatActivity() {
         scope.launch {
             while (isActive) {
                 checkBatteryStatus()
-                delay(300000) // 5 分钟检查一次
+                delay(300000)
             }
         }
     }
@@ -104,28 +156,21 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
         val ip = prefs.getString("gateway_ip", null) ?: return
         val port = prefs.getInt("port_opengw", 8000)
-        
         try {
             val request = Request.Builder().url("http://$ip:$port/api/status").build()
             val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
             val body = response.body?.string() ?: return
             val json = JSONObject(body)
             val level = json.optInt("battery_level", -1)
-            
             if (level != -1) {
                 if (level >= 100 && !isBatteryFullNotified) {
                     sendNotification("电量已满", "受管理设备电量已达到100%")
                     isBatteryFullNotified = true
-                } else if (level < 95) {
-                    isBatteryFullNotified = false
-                }
-
+                } else if (level < 95) isBatteryFullNotified = false
                 if (level <= 20 && !isBatteryLowNotified) {
                     sendNotification("低电量警告", "受管理设备电量低于20% ($level%)")
                     isBatteryLowNotified = true
-                } else if (level > 25) {
-                    isBatteryLowNotified = false
-                }
+                } else if (level > 25) isBatteryLowNotified = false
             }
         } catch (e: Exception) {}
     }
@@ -136,13 +181,9 @@ class MainActivity : AppCompatActivity() {
             .setContentTitle(title)
             .setContentText(content)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
-
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(System.currentTimeMillis().toInt(), builder.build())
     }
 
     private fun showSettingsDialog() {
@@ -152,8 +193,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(60, 40, 60, 40)
         }
-        
-        val ipEdit = EditText(this).apply { setText(prefs.getString("gateway_ip", "192.168.0.1")) }
+        val ipEdit = EditText(this).apply { setText(prefs.getString("gateway_ip", "192.168.9.1")) }
         val pwdEdit = EditText(this).apply {
             setText(prefs.getString("gateway_pwd", ""))
             hint = "网关管理密码"
@@ -168,7 +208,7 @@ class MainActivity : AppCompatActivity() {
         
         val btnTest = Button(this).apply {
             text = "发送测试通知"
-            setOnClickListener { sendNotification("测试成功", "OpenGW Mobile 电源监控通知功能正常。") }
+            setOnClickListener { sendNotification("测试成功", "OpenGW Mobile 通知功能正常。") }
         }
 
         val btnExit = Button(this).apply {
@@ -186,33 +226,21 @@ class MainActivity : AppCompatActivity() {
         layout.addView(TextView(this).apply { text = "官方 Web 端口"; setPadding(0, 20, 0, 0); textSize = 12f })
         layout.addView(officialPortEdit)
         layout.addView(defaultCheck)
-        
         layout.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 40) })
         layout.addView(btnTest)
         layout.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 20) })
         layout.addView(btnExit)
-        
-        scrollView.addView(layout)
 
-        AlertDialog.Builder(this)
-            .setTitle("高级设置")
-            .setView(scrollView)
+        AlertDialog.Builder(this).setTitle("高级设置").setView(scrollView.apply { if (parent == null) addView(layout) })
             .setPositiveButton("保存并重启") { _, _ ->
                 val ip = ipEdit.text.toString().trim()
                 val pwd = pwdEdit.text.toString().trim()
                 val p1 = opengwPortEdit.text.toString().toIntOrNull() ?: 8000
                 val p2 = officialPortEdit.text.toString().toIntOrNull() ?: 8080
-                prefs.edit()
-                    .putString("gateway_ip", ip)
-                    .putString("gateway_pwd", pwd)
-                    .putInt("port_opengw", p1)
-                    .putInt("port_official", p2)
-                    .putInt("default_port", if (defaultCheck.isChecked) p1 else p2)
-                    .apply()
+                prefs.edit().putString("gateway_ip", ip).putString("gateway_pwd", pwd).putInt("port_opengw", p1).putInt("port_official", p2).putInt("default_port", if (defaultCheck.isChecked) p1 else p2).apply()
                 recreate()
             }
-            .setNegativeButton("取消", null)
-            .show()
+            .setNegativeButton("取消", null).show()
     }
 
     private fun showSetupDialog() {
@@ -220,7 +248,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(60, 40, 60, 10)
         }
-        val ipEdit = EditText(this).apply { setText("192.168.0.1") }
+        val ipEdit = EditText(this).apply { setText("192.168.9.1") }
         val pwdEdit = EditText(this).apply { 
             hint = "网关管理密码"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -229,31 +257,27 @@ class MainActivity : AppCompatActivity() {
         layout.addView(ipEdit)
         layout.addView(TextView(this).apply { text = "管理密码"; setPadding(0, 20, 0, 0) })
         layout.addView(pwdEdit)
-
-        AlertDialog.Builder(this)
-            .setTitle("初始化设置")
-            .setView(layout)
-            .setCancelable(false)
+        AlertDialog.Builder(this).setTitle("初始化设置").setView(layout).setCancelable(false)
             .setPositiveButton("保存并登录") { _, _ ->
                 val ip = ipEdit.text.toString().trim()
                 val pwd = pwdEdit.text.toString().trim()
-                getSharedPreferences("config", Context.MODE_PRIVATE).edit()
-                    .putString("gateway_ip", ip).putString("gateway_pwd", pwd)
-                    .putInt("port_opengw", 8000).putInt("port_official", 8080).putInt("default_port", 8000).apply()
+                getSharedPreferences("config", Context.MODE_PRIVATE).edit().putString("gateway_ip", ip).putString("gateway_pwd", pwd).putInt("port_opengw", 8000).putInt("port_official", 8080).putInt("default_port", 8000).apply()
                 currentPort = 8000
                 startAppFlow()
-            }
-            .show()
+            }.show()
     }
 
     private fun switchWebVersion() {
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
-        val ip = prefs.getString("gateway_ip", "192.168.0.1")!!
         val p1 = prefs.getInt("port_opengw", 8000)
         val p2 = prefs.getInt("port_official", 8080)
+        
+        // 核心修复：切换端口，但不要重启隧道
         currentPort = if (currentPort == p1) p2 else p1
-        Toast.makeText(this, "正在切换版本...", Toast.LENGTH_SHORT).show()
-        webView.loadUrl("http://$ip:$currentPort/index.html")
+        val targetName = if (currentPort == p1) "OpenGW Web" else "官方 Web"
+        
+        Toast.makeText(this, "正在切换到: $targetName", Toast.LENGTH_SHORT).show()
+        webView.loadUrl("http://127.0.0.1:$currentPort/index.html")
     }
 
     private fun startAppFlow() {
@@ -272,12 +296,12 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 loadingLayout.visibility = View.VISIBLE
+                webView.evaluateJavascript("sessionStorage.setItem('isLoggedIn', 'true');", null)
             }
             override fun onPageFinished(view: WebView?, url: String?) {
                 loadingLayout.visibility = View.GONE
                 webView.visibility = View.VISIBLE
                 webView.evaluateJavascript("sessionStorage.setItem('isLoggedIn', 'true');", null)
-                // 关键：页面加载完成后清除历史，防止返回到加载页
                 view?.clearHistory()
             }
         }
@@ -288,30 +312,35 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { recreate() }
             }
             @JavascriptInterface
-            fun exitApp() {
-                finishAffinity()
-            }
+            fun exitApp() { finishAffinity() }
         }, "AndroidBridge")
     }
 
     private fun performAutoLogin() {
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
-        val ip = prefs.getString("gateway_ip", "192.168.0.1")!!
+        val ip = prefs.getString("gateway_ip", "192.168.9.1")!!
         val pwd = prefs.getString("gateway_pwd", "")!!
         val p1 = prefs.getInt("port_opengw", 8000)
         val p2 = prefs.getInt("port_official", 8080)
 
         scope.launch {
             infoText.text = "正在同步网关登录状态..."
+            // 隧道只在启动/登录时启动一次，且涵盖所有端口
+            startMultiTunnel(ip)
+            
             val cookie = withContext(Dispatchers.IO) { doGatewayLogin(ip, pwd) }
             if (cookie != null) {
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
-                    setCookie("http://$ip:$p1", cookie)
-                    setCookie("http://$ip:$p2", cookie)
+                    // 为所有可能的本地端口注入 Cookie
+                    setCookie("http://127.0.0.1:8000", cookie)
+                    setCookie("http://127.0.0.1:8080", cookie)
+                    setCookie("http://127.0.0.1:7681", cookie)
+                    if (p1 != 8000) setCookie("http://127.0.0.1:$p1", cookie)
+                    if (p2 != 8080) setCookie("http://127.0.0.1:$p2", cookie)
                     flush()
                 }
-                webView.loadUrl("http://$ip:$currentPort/index.html")
+                webView.loadUrl("http://127.0.0.1:$currentPort/index.html")
             } else {
                 infoText.text = "自动登录失败，点击重试"
                 loadingLayout.setOnClickListener { recreate() }
@@ -339,21 +368,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastBackTime < 2000) {
-                finishAffinity() // 快速双击直接关闭所有 Activity 退出
-            } else {
+        if (webView.canGoBack()) webView.goBack()
+        else {
+            val ct = System.currentTimeMillis()
+            if (ct - lastBackTime < 2000) finishAffinity()
+            else {
                 Toast.makeText(this, "再按一次退出应用", Toast.LENGTH_SHORT).show()
-                lastBackTime = currentTime
+                lastBackTime = ct
             }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        tunnelJobs.forEach { it.cancel() }
         scope.cancel()
     }
 }

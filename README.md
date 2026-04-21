@@ -1,52 +1,26 @@
-# OpenGW Mobile
+# OpenGW Mobile (Pro)
 
-OpenGW Mobile 是一款专为随身 WiFi 和定制网关设计的 Android 管理客户端。它采用极简的“移动浏览器壳”架构，旨在为用户提供最快、最无感的网关管理体验。
+OpenGW Mobile 是一款专为随身 WiFi 和定制网关设计的 Android 高级管理客户端。通过集成**本地安全隧道**技术，它不仅是一个管理工具，更是一个解锁了硬件加速能力的移动浏览器。
 
 ## ✨ 核心特性
 
-- **🚀 极速自动登录**：应用启动后自动与网关进行握手认证，并将登录凭证（Cookie）同步注入到 WebView 中，彻底告别手动输入密码。
-- **🔄 双版本一键切换**：内置悬浮按钮，支持在 **OpenGW 定制界面** 与 **官方管理界面** 之间无缝切换。
-- **⚙️ 高级自定义设置**：支持手动修改网关 IP、自定义 OpenGW/官方 Web 端口，并可设置默认进入的版本。
-- **🔋 电源监控通知**：自动定时检测受管理设备的电量，并在**低电量（<=20%）**或**满电（100%）**时发送系统通知提醒。
-- **📦 极致精简**：移除了沉重的后台服务及 Root 管理逻辑，仅保留核心浏览与同步功能，APK 极其小巧。
-- **📱 专用 User-Agent**：提供标识符 `OpenWrtLiteManager/1.0`，方便远程 Web 端识别。
-- **🔃 快捷刷新**：内置物理悬浮刷新按钮，随时获取网关最新状态。
+- **🔒 强制安全上下文 (Secure Context)**：**[核心突破]** 通过内置多端口透明转发隧道，将远程网关服务映射至手机本地 `127.0.0.1`。此举让 WebView 内核认定环境为“安全来源”，从而自动解锁 **WebCodecs API**。
+- **📺 Scrcpy 投屏完美支持**：解决了在非安全 HTTP 环境下投屏画面黑屏、无法调用硬件解码的顽疾，提供流畅的桌面控制体验。
+- **🚀 极速自动登录**：应用启动后自动与网关进行握手认证，并将登录凭证（Cookie）**同步注入到所有隧道端口**（8000/8080/7681），彻底告别手动输入密码。
+- **🔄 多版本/端口无缝切换**：支持在 **OpenGW 定制界面** 与 **官方管理界面** 之间切换，且隧道会自动跟随端口变化。
+- **⚙️ 高级自定义设置**：支持修改网关 IP、自定义端口映射、修改管理密码，并支持“双击返回”及“一键退出”。
+- **🔋 电源监控通知**：自动定时监测设备电量，支持低电量（<=20%）警告与满电提醒。
 
-## 🚀 快速开始
+## 🚀 故障排查
 
-### 编译环境
-- Android Studio Hedgehog 或更高版本
-- JDK 11+
-- Gradle 8.0+
-
-### 构建步骤
-1. 使用 Android Studio 打开项目。
-2. 运行或执行 `./gradlew assembleRelease` 生成 APK。
-3. 首次启动请在弹窗中设置网关 IP 和管理密码。
-
-## 🌐 Web 端适配建议
-
-为了让您的远程网页能够完美识别并跳过 App 内部的登录，建议在您的 `index.html` 入口处添加以下逻辑：
-
-```javascript
-// 检测是否在 OpenGW Mobile App 中运行
-const isApp = navigator.userAgent.indexOf('OpenWrtLiteManager') > -1 || !!window.AndroidBridge;
-
-if (isApp) {
-    // 如果是 App 访问，自动设置登录状态，跳过 login.html
-    sessionStorage.setItem('isLoggedIn', 'true');
-} else if (sessionStorage.getItem('isLoggedIn') !== 'true') {
-    // 只有普通浏览器访问且未登录时，才跳转到登录页
-    window.location.href = 'login.html';
-}
-```
+### 为什么 8080 端口打不开？
+如果 8080 端口无法打开，通常是由于 Cookie 未能正确同步。v1.4 版本已实现全端口凭证注入，确保在切换 `127.0.0.1` 下的不同服务时无需重复登录。
 
 ## 🛠️ 技术架构
 
-- **语言**：Kotlin
-- **版本**：v1.1 (Build 2)
-- **核心库**：WebView, Coroutines, OkHttp3
-- **权限占用**：联网权限及通知权限（Android 13+）
+- **内核**：WebView (Chrome 内核)
+- **隧道**：Kotlin Coroutines + ServerSocket (支持 SO_REUSEADDR)
+- **版本**：v1.4 (Build 5 - Connectivity Fix)
 
 ## 📄 许可证
 
