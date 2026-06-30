@@ -43,4 +43,7 @@ dependencies {
     
     // 协程支持
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
+
+    // Lifecycle KTX (lifecycleScope)
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.5.1")
 }
