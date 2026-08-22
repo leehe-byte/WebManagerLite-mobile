@@ -13,6 +13,7 @@ android {
         targetSdk = 33
         versionCode = 8
         versionName = "2.1"
+        setProperty("archivesBaseName", "${rootProject.name}-${versionName}")
     }
 
     buildTypes {

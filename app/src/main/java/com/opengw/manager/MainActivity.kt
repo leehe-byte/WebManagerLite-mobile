@@ -28,6 +28,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -49,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private val tunnelJobs = mutableListOf<Job>()
     private var notificationId = 0
     private var isAutoLoginDone = false
+    private var openGwToken: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -184,11 +186,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun checkBatteryStatus() {
+        val token = openGwToken ?: return
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
         val ip = prefs.getString("gateway_ip", null) ?: return
         val port = prefs.getInt("port_opengw", 8000)
         try {
-            val request = Request.Builder().url("http://$ip:$port/api/status").build()
+            val request = Request.Builder().url("http://$ip:$port/api/status")
+                .header("X-Auth-Token", token)
+                .build()
             val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
             val body = response.body?.string() ?: return
             val json = JSONObject(body)
@@ -358,7 +363,13 @@ class MainActivity : AppCompatActivity() {
                 btnSwitch.visibility = View.VISIBLE
                 btnSettings.visibility = View.VISIBLE
                 if (isAutoLoginDone) {
-                    webView.evaluateJavascript("sessionStorage.setItem('isLoggedIn', 'true');", null)
+                    val token = openGwToken
+                    val js = if (token != null) {
+                        "sessionStorage.setItem('isLoggedIn', 'true'); sessionStorage.setItem('authToken', '$token');"
+                    } else {
+                        "sessionStorage.setItem('isLoggedIn', 'true');"
+                    }
+                    webView.evaluateJavascript(js, null)
                 }
             }
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -411,7 +422,9 @@ class MainActivity : AppCompatActivity() {
             startMultiTunnel(ip)
 
             val cookie = withContext(Dispatchers.IO) { doGatewayLogin(ip, pwd) }
+            val token = withContext(Dispatchers.IO) { doOpenGWLogin(pwd) }
             if (cookie != null) {
+                openGwToken = token
                 isAutoLoginDone = true
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
@@ -444,6 +457,24 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e("Login", "Gateway login failed", e)
             return null
+        }
+    }
+
+    /** OpenGW Web 登录：用官方密码换取会话 token，供前端 API 鉴权 */
+    private fun doOpenGWLogin(pwd: String): String? {
+        return try {
+            val json = JSONObject().put("password", pwd).toString()
+            val body = "postData=" + URLEncoder.encode(json, "UTF-8")
+            val request = Request.Builder()
+                .url("http://127.0.0.1:8000/api/auth/login")
+                .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+                .build()
+            val res = client.newCall(request).execute()
+            val data = JSONObject(res.body?.string() ?: "")
+            if (data.optInt("result") == 0) data.optString("token").ifEmpty { null } else null
+        } catch (e: Exception) {
+            Log.e("Login", "OpenGW login failed", e)
+            null
         }
     }
 
