@@ -113,7 +113,12 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
         val p1 = prefs.getInt("port_opengw", 8000)
         val p2 = prefs.getInt("port_official", 8080)
-        val ports = setOf(p1, p2, 7681, 8080, 8000, 7788)
+        // 固定端口 + 用户配置的额外映射端口（供插件自定义端口，如代理面板 9090）
+        val extraPorts = prefs.getString("extra_tunnel_ports", "")
+            ?.split(",", "，", " ")
+            ?.mapNotNull { it.trim().toIntOrNull() }
+            ?: emptyList()
+        val ports = (setOf(p1, p2, 7681, 8080, 8000, 7788) + extraPorts).toSet()
 
         ports.forEach { port ->
             val job = lifecycleScope.launch(Dispatchers.IO) {
@@ -242,6 +247,10 @@ class MainActivity : AppCompatActivity() {
         }
         val opengwPortEdit = EditText(this).apply { setText(prefs.getInt("port_opengw", 8000).toString()) }
         val officialPortEdit = EditText(this).apply { setText(prefs.getInt("port_official", 8080).toString()) }
+        val extraPortsEdit = EditText(this).apply {
+            setText(prefs.getString("extra_tunnel_ports", "") ?: "")
+            hint = "如 9090, 9091（逗号分隔）"
+        }
         val defaultCheck = CheckBox(this).apply {
             text = "默认进入 OpenGW 版本"
             isChecked = prefs.getInt("default_port", 8000) == prefs.getInt("port_opengw", 8000)
@@ -266,6 +275,14 @@ class MainActivity : AppCompatActivity() {
         layout.addView(opengwPortEdit)
         layout.addView(TextView(this).apply { text = "官方 Web 端口"; setPadding(0, 20, 0, 0); textSize = 12f })
         layout.addView(officialPortEdit)
+        layout.addView(TextView(this).apply { text = "额外映射端口"; setPadding(0, 20, 0, 0); textSize = 12f })
+        layout.addView(extraPortsEdit)
+        layout.addView(TextView(this).apply {
+            text = "新插件如需访问设备自定义端口（如代理面板 9090），在此添加，逗号分隔"
+            setPadding(0, 0, 0, 0)
+            textSize = 10f
+            setTextColor(android.graphics.Color.GRAY)
+        })
         layout.addView(defaultCheck)
         layout.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 40) })
         layout.addView(btnTest)
@@ -287,6 +304,7 @@ class MainActivity : AppCompatActivity() {
                     .remove("gateway_pwd")
                     .putInt("port_opengw", p1)
                     .putInt("port_official", p2)
+                    .putString("extra_tunnel_ports", extraPortsEdit.text.toString().trim())
                     .putInt("default_port", if (defaultCheck.isChecked) p1 else p2)
                     .apply()
                 recreate()
