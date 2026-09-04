@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
         btnSwitch = findViewById(R.id.btnSwitch)
         btnSettings = findViewById(R.id.btnSettings)
 
-        btnRefresh.setOnClickListener { webView.reload() }
+        btnRefresh.setOnClickListener { reloadCurrentWeb() }
         btnSwitch.setOnClickListener { switchWebVersion() }
         btnSettings.setOnClickListener { showSettingsDialog() }
 
@@ -353,7 +353,23 @@ class MainActivity : AppCompatActivity() {
         val targetName = if (currentPort == p1) "OpenGW Web" else "官方 Web"
 
         Toast.makeText(this, "正在切换到: $targetName", Toast.LENGTH_SHORT).show()
-        webView.loadUrl("http://127.0.0.1:$currentPort/index.html")
+        webView.loadUrl("http://${webHost(currentPort)}:$currentPort/index.html")
+    }
+
+    /** OpenGW 走本机隧道（WebSocket/远程控制需经隧道转发，暂保留）；官方端口直连设备 IP */
+    private fun webHost(port: Int): String {
+        val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
+        val p1 = prefs.getInt("port_opengw", 8000)
+        return if (port == p1) {
+            "127.0.0.1"
+        } else {
+            prefs.getString("gateway_ip", "192.168.9.1") ?: "192.168.9.1"
+        }
+    }
+
+    /** 刷新/重试：重新加载当前目标（OpenGW 直连设备 IP），比 reload 更彻底地绕过错误态 */
+    private fun reloadCurrentWeb() {
+        webView.loadUrl("http://${webHost(currentPort)}:$currentPort/index.html")
     }
 
     private fun startAppFlow() {
@@ -406,7 +422,7 @@ class MainActivity : AppCompatActivity() {
                 loadingLayout.visibility = View.VISIBLE
                 webView.visibility = View.GONE
                 infoText.text = "页面加载失败，点击重试"
-                loadingLayout.setOnClickListener { webView.reload() }
+                loadingLayout.setOnClickListener { reloadCurrentWeb() }
             }
         }
 
@@ -427,6 +443,8 @@ class MainActivity : AppCompatActivity() {
             }
             @JavascriptInterface
             fun exitApp() { finishAffinity() }
+            @JavascriptInterface
+            fun getToken(): String = openGwToken ?: ""
         }, "AndroidBridge")
     }
 
@@ -458,14 +476,16 @@ class MainActivity : AppCompatActivity() {
                 isAutoLoginDone = true
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
+                    // OpenGW 走本机隧道，cookie 绑 127.0.0.1（OpenGW 自身用 token，原厂 cookie 供隧道内资源）
                     setCookie("http://127.0.0.1:8000", cookie)
-                    setCookie("http://127.0.0.1:8080", cookie)
                     setCookie("http://127.0.0.1:7681", cookie)
                     if (p1 != 8000) setCookie("http://127.0.0.1:$p1", cookie)
-                    if (p2 != 8080) setCookie("http://127.0.0.1:$p2", cookie)
+                    // 官方 Web 直连设备 IP，cookie 需绑定到设备 IP 才生效
+                    setCookie("http://$ip:8080", cookie)
+                    if (p2 != 8080) setCookie("http://$ip:$p2", cookie)
                     flush()
                 }
-                webView.loadUrl("http://127.0.0.1:$currentPort/index.html")
+                webView.loadUrl("http://${webHost(currentPort)}:$currentPort/index.html")
             } else {
                 infoText.text = "自动登录失败，点击重试"
                 loadingLayout.setOnClickListener { performAutoLogin() }
@@ -490,13 +510,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** OpenGW Web 登录：用官方密码换取会话 token，供前端 API 鉴权 */
+    /** OpenGW Web 登录：用官方密码换取会话 token（直连设备 IP，不走隧道） */
     private fun doOpenGWLogin(pwd: String): String? {
         return try {
+            val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
+            val ip = prefs.getString("gateway_ip", "192.168.9.1") ?: "192.168.9.1"
+            val p1 = prefs.getInt("port_opengw", 8000)
             val json = JSONObject().put("password", pwd).toString()
             val body = "postData=" + URLEncoder.encode(json, "UTF-8")
             val request = Request.Builder()
-                .url("http://127.0.0.1:8000/api/auth/login")
+                .url("http://$ip:$p1/api/auth/login")
                 .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
                 .build()
             val res = client.newCall(request).execute()
