@@ -373,6 +373,18 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                // 仅主页面加载失败才进入错误页；iframe/子资源错误一律忽略，避免整页误判崩溃
+                if (request?.isForMainFrame() != true) return
+                showLoadError()
+            }
+
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                // iframe/子资源 HTTP 错误（404/5xx）忽略；仅主页面 HTTP 错误进入错误页
+                if (request?.isForMainFrame() != true) return
+                showLoadError()
+            }
+
+            private fun showLoadError() {
                 loadingLayout.visibility = View.VISIBLE
                 webView.visibility = View.GONE
                 infoText.text = "页面加载失败，点击重试"
