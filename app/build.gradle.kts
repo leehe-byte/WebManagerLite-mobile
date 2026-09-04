@@ -11,8 +11,8 @@ android {
         applicationId = "com.opengw.manager"
         minSdk = 24
         targetSdk = 33
-        versionCode = 8
-        versionName = "2.1"
+        versionCode = 9
+        versionName = "2.2"
         setProperty("archivesBaseName", "${rootProject.name}-${versionName}")
     }
 
